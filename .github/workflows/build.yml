@@ -19,54 +19,94 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Prepare Android project
+      - name: Install unzip
+        run: sudo apt-get update && sudo apt-get install -y unzip
+
+      - name: Locate Android project
         shell: bash
         run: |
-          set -e
-          PROJECT_DIR="."
+          set -euo pipefail
 
-          if ! find . -type f -name gradlew -print -quit | grep -q .; then
-            mkdir -p extracted
+          echo "Checking repository for Gradle project..."
 
-            FOUND=false
-            while IFS= read -r -d '' zipfile; do
-              if unzip -Z1 "$zipfile" | grep -Eq '(^|/)gradlew$'; then
-                echo "Extracting Android project: $zipfile"
-                unzip -oq "$zipfile" -d extracted
-                FOUND=true
-                break
-              fi
-            done < <(find . -maxdepth 2 -type f -name '*.zip' -print0)
+          PROJECT_DIR=""
 
-            if [ "$FOUND" != true ]; then
-              echo "ERROR: No ZIP containing gradlew found."
-              exit 1
-            fi
-
-            PROJECT_DIR=$(find extracted -type f -name gradlew -print -quit | xargs -r dirname)
-
-            if [ -z "$PROJECT_DIR" ]; then
-              echo "ERROR: gradlew not found after extraction."
-              exit 1
-            fi
+          # First check whether the project is already extracted.
+          if [ -f "./gradlew" ]; then
+            PROJECT_DIR="."
           else
-            PROJECT_DIR=$(find . -type f -name gradlew -print -quit | xargs -r dirname)
+            GRADLEW_PATH=$(find . -type f -name gradlew \
+              -not -path './.git/*' -print -quit || true)
+
+            if [ -n "$GRADLEW_PATH" ]; then
+              PROJECT_DIR=$(dirname "$GRADLEW_PATH")
+            fi
           fi
 
-          echo "Project directory: $PROJECT_DIR"
-          test -f "$PROJECT_DIR/settings.gradle.kts" || test -f "$PROJECT_DIR/settings.gradle"
+          # If no Gradle wrapper exists, extract the project ZIP.
+          if [ -z "$PROJECT_DIR" ]; then
+            mkdir -p extracted
+
+            ZIP_FOUND=false
+
+            while IFS= read -r -d '' ZIP_FILE; do
+              if unzip -Z1 "$ZIP_FILE" | grep -Eq '(^|/)gradlew$'; then
+                echo "Extracting: $ZIP_FILE"
+                unzip -oq "$ZIP_FILE" -d extracted
+                ZIP_FOUND=true
+                break
+              fi
+            done < <(find . -maxdepth 2 -type f \
+              -name '*.zip' \
+              -not -path './.git/*' \
+              -print0)
+
+            if [ "$ZIP_FOUND" != true ]; then
+              echo "ERROR: No ZIP containing gradlew was found."
+              exit 1
+            fi
+
+            GRADLEW_PATH=$(find extracted -type f \
+              -name gradlew -print -quit || true)
+
+            if [ -z "$GRADLEW_PATH" ]; then
+              echo "ERROR: gradlew missing after extraction."
+              exit 1
+            fi
+
+            PROJECT_DIR=$(dirname "$GRADLEW_PATH")
+          fi
+
+          echo "Detected project directory: $PROJECT_DIR"
+
+          if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && \
+             [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
+            echo "ERROR: Gradle settings file not found."
+            find "$PROJECT_DIR" -maxdepth 3 -type f | head -80
+            exit 1
+          fi
+
+          if [ ! -d "$PROJECT_DIR/app" ]; then
+            echo "ERROR: Android app folder not found."
+            find "$PROJECT_DIR" -maxdepth 3 -type d | head -50
+            exit 1
+          fi
+
+          chmod +x "$PROJECT_DIR/gradlew"
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
       - name: Build Debug APK
+        shell: bash
         run: |
+          set -e
           cd "$PROJECT_DIR"
-          chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: JARVIS-debug-APK
-          path: |
-            **/build/outputs/apk/debug/*.apk
+          path: '**/build/outputs/apk/debug/*.apk'
           if-no-files-found: error
+          
